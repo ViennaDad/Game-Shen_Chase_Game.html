@@ -2,252 +2,630 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Top Down Survival Game</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1.0" />
+  <title>Shot Put Timing Trainer</title>
   <style>
-    body { margin: 0; overflow: hidden; background: #000; }
-    canvas { display: block; margin: 0 auto; background: #111; }
+    body { margin:0; background:#0b0b0b; color:#eaeaea; font-family: Arial, sans-serif; }
+    .wrap { display:flex; flex-direction:column; align-items:center; gap:10px; padding:12px; }
+    canvas { background:#111; border:1px solid #2a2a2a; border-radius:12px; }
+    .panel { width: 980px; max-width: 96vw; display:grid; grid-template-columns: 1.2fr 1fr; gap:10px; }
+    .card { background:#141414; border:1px solid #2a2a2a; border-radius:12px; padding:12px; }
+    .row { display:flex; gap:10px; flex-wrap:wrap; align-items:center; }
+    button {
+      background:#1f1f1f; color:#eaeaea; border:1px solid #333; border-radius:12px;
+      padding:10px 12px; cursor:pointer;
+    }
+    button:hover { border-color:#555; }
+    button:disabled { opacity:0.45; cursor:not-allowed; }
+    .muted { color:#b8b8b8; font-size:13px; line-height:1.35; }
+    .title { font-size:16px; margin:0 0 8px 0; }
+    .big { font-size:18px; }
+    .kbd {
+      display:inline-block; padding:2px 8px; border:1px solid #444; border-radius:8px;
+      background:#0f0f0f; font-size:13px; margin:0 2px;
+    }
   </style>
 </head>
 <body>
-  <canvas id="gameCanvas" width="800" height="600"></canvas>
+<div class="wrap">
+  <canvas id="c" width="980" height="560"></canvas>
 
-  <script>
-    const canvas = document.getElementById("gameCanvas");
-    const ctx = canvas.getContext("2d");
+  <div class="panel">
+    <div class="card">
+      <p class="title">Select a throw</p>
+      <div class="row">
+        <button id="btnStand" type="button">Stand Throw (max 35')</button>
+        <button id="btnGlide" type="button">Glide (max 45')</button>
+        <button id="btnSpin"  type="button">Spin (max 55')</button>
+      </div>
+      <p class="muted" style="margin-top:10px;">
+        Distance depends on how fast you complete the sequence. Faster equals farther.<br>
+        If you hit <span class="kbd">Space</span> before finishing the arrow sequence, your throw is heavily penalized.<br>
+        The game is locked after a throw. Press <span class="kbd">R</span> to restart.
+      </p>
+    </div>
 
-    const MAX_ENEMIES = 14;
+    <div class="card">
+      <p class="title">Instructions</p>
+      <div id="instructions" class="muted">Choose Stand, Glide, or Spin.</div>
 
-    let keys = {};
-    let animationId = null;
-    let spawnIntervalId = null;
-    let gameOver = false;
+      <p class="title" style="margin-top:10px;">Status</p>
+      <div id="status" class="big">No throw yet.</div>
 
-    const ENEMY_LABELS = [
-      "Homework",
-      "Sports Practice",
-      "Mom on Suzy Day",
-      "Dad Helping with Homework",
-      "Tests",
-      "Rainy Day",
-      "Peer Pressure",
-      "Being Chopped",
-      "Walking Home",
-      "Punished",
-      "No Screen Time",
-      "Feed the Pets",
-      "Do the Dishes",
-      "Kitty Litter"
-    ];
+      <p class="title" style="margin-top:10px;">Result</p>
+      <div id="result" class="big">—</div>
 
-    // Used to ensure no duplicate enemy labels appear at the same time.
-    let remainingLabels = [];
+      <div id="debug" class="muted" style="margin-top:10px;"></div>
+    </div>
+  </div>
+</div>
 
-    function isMomDad(label) {
-      return label === "Mom on Suzy Day" || label === "Dad Helping with Homework";
+<script>
+(() => {
+  const canvas = document.getElementById("c");
+  const ctx = canvas.getContext("2d");
+
+  const instructionsEl = document.getElementById("instructions");
+  const statusEl = document.getElementById("status");
+  const resultEl = document.getElementById("result");
+  const debugEl = document.getElementById("debug");
+
+  const btnStand = document.getElementById("btnStand");
+  const btnGlide = document.getElementById("btnGlide");
+  const btnSpin  = document.getElementById("btnSpin");
+
+  const scene = {
+    groundY: 470,
+    circle: { x: 220, y: 370, r: 78 },
+    foulLineX: 330,
+    sector: { x0: 330, y0: 470, x1: 940, y1: 470, x2: 940, y2: 330, x3: 330, y3: 250 }
+  };
+
+  const distanceScale = {
+    startX: 360,
+    endX: 940,
+    maxFt: 55,
+    pxPerFt: (940 - 360) / 55
+  };
+
+  function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+
+  const TECH = {
+    stand: {
+      name: "Stand Throw",
+      minFt: 10, maxFt: 35,
+      fastMs: 650, slowMs: 2000,
+      steps: ["ArrowLeft", "ArrowRight", "Space"],
+      instructions:
+        `Stand Throw<br>
+         1) <span class="kbd">←</span> load (back/coil)<br>
+         2) <span class="kbd">→</span> drive/turn into power<br>
+         3) <span class="kbd">Space</span> release<br><br>
+         Faster completion = farther (max 35').`
+    },
+    glide: {
+      name: "Glide",
+      minFt: 15, maxFt: 45,
+      fastMs: 1050, slowMs: 3200,
+      steps: ["ArrowRight", "ArrowRight", "ArrowRight", "Space"],
+      instructions:
+        `Glide<br>
+         1) <span class="kbd">→</span> start movement<br>
+         2) <span class="kbd">→</span> block leg lands (power position)<br>
+         3) <span class="kbd">→</span> start release<br>
+         4) <span class="kbd">Space</span> release<br><br>
+         Faster completion = farther (max 45').`
+    },
+    spin: {
+      name: "Spin",
+      minFt: 20, maxFt: 55,
+      fastMs: 1450, slowMs: 4200,
+      steps: ["ArrowLeft", "ArrowLeft", "ArrowRight", "ArrowRight", "Space"],
+      instructions:
+        `Spin<br>
+         1) <span class="kbd">←</span> entry<br>
+         2) <span class="kbd">←</span> right foot down<br>
+         3) <span class="kbd">→</span> rotate to power<br>
+         4) <span class="kbd">→</span> start release<br>
+         5) <span class="kbd">Space</span> release<br><br>
+         Faster completion = farther (max 55').`
     }
+  };
 
-    // Scoreboard key (drawn on screen)
-    const SCORE_KEY = [
-      "500 = You've failed at Madison",
-      "1000 = Like averaging a C in school",
-      "1500 = Not bad!",
-      "2000 = George Mason material",
-      "2500 = Like 1500 in SATs",
-      "3000 = Harvard here we come!"
-    ];
-
-    function currentScoreTier(score) {
-      // Highest tier achieved so far
-      if (score >= 3000) return "Harvard here we come!";
-      if (score >= 2500) return "Like 1500 in SATs";
-      if (score >= 2000) return "George Mason material";
-      if (score >= 1500) return "Not bad!";
-      if (score >= 1000) return "Like averaging a C in school";
-      if (score >= 500)  return "You've failed at Madison";
-      return "Survive longer to level up";
-    }
-
-    document.addEventListener("keydown", (e) => {
-      keys[e.key] = true;
-      if (["ArrowUp","ArrowDown","ArrowLeft","ArrowRight"].includes(e.key)) e.preventDefault();
-      // Allow restart any time, but it only triggers if gameOver === true.
-      if ((e.key === "r" || e.key === "R") && gameOver) resetGame();
-    });
-
-    document.addEventListener("keyup", (e) => {
-      keys[e.key] = false;
-    });
-
-    let player, enemies, score;
-
-    function resetGame() {
-      player = { x: 390, y: 290, size: 14, speed: 4, label: "Shen Kid" };
-      enemies = [];
-      score = 0;
-      gameOver = false;
-
-      // Reset label pool so all 14 labels are available once per run
-      remainingLabels = ENEMY_LABELS.slice();
-
-      if (animationId !== null) cancelAnimationFrame(animationId);
-      if (spawnIntervalId !== null) clearInterval(spawnIntervalId);
-
-      spawnIntervalId = setInterval(spawnEnemy, 1000);
-      gameLoop();
-    }
-
-    function spawnEnemy() {
-      if (gameOver) return;
-      if (enemies.length >= MAX_ENEMIES) return;
-      if (remainingLabels.length === 0) return; // No labels left to keep enemies distinct
-
-      const size = 12;
-      const side = Math.floor(Math.random() * 4);
-      let x, y;
-
-      if (side === 0) { x = -size; y = Math.random() * canvas.height; }
-      if (side === 1) { x = canvas.width + size; y = Math.random() * canvas.height; }
-      if (side === 2) { x = Math.random() * canvas.width; y = -size; }
-      if (side === 3) { x = Math.random() * canvas.width; y = canvas.height + size; }
-
-      // Pick a unique label by removing it from the remaining pool
-      const idx = Math.floor(Math.random() * remainingLabels.length);
-      const label = remainingLabels.splice(idx, 1)[0];
-
-      // Slower overall. Mom/Dad a bit faster than the others.
-      const speed = isMomDad(label)
-        ? (1.2 + Math.random() * 0.6)
-        : (0.6 + Math.random() * 0.6);
-
-      enemies.push({ x, y, size, speed, label });
-    }
-
-    function endGame() {
-      gameOver = true;
-
-      if (spawnIntervalId !== null) clearInterval(spawnIntervalId);
-      spawnIntervalId = null;
-
-      if (animationId !== null) cancelAnimationFrame(animationId);
-      animationId = null;
-
-      draw(true);
-    }
-
-    function update() {
-      if (gameOver) return;
-
-      if (keys["ArrowUp"] || keys["w"]) player.y -= player.speed;
-      if (keys["ArrowDown"] || keys["s"]) player.y += player.speed;
-      if (keys["ArrowLeft"] || keys["a"]) player.x -= player.speed;
-      if (keys["ArrowRight"] || keys["d"]) player.x += player.speed;
-
-      player.x = Math.max(0, Math.min(canvas.width - player.size, player.x));
-      player.y = Math.max(0, Math.min(canvas.height - player.size, player.y));
-
-      for (const enemy of enemies) {
-        const dx = (player.x + player.size / 2) - (enemy.x + enemy.size / 2);
-        const dy = (player.y + player.size / 2) - (enemy.y + enemy.size / 2);
-        const dist = Math.sqrt(dx * dx + dy * dy) || 0.0001;
-
-        enemy.x += (dx / dist) * enemy.speed;
-        enemy.y += (dy / dist) * enemy.speed;
-
-        if (dist < (player.size * 0.75 + enemy.size * 0.75)) {
-          endGame();
-          return;
-        }
+  // Poses include handR, used as the shot spawn point.
+  const POSES = {
+    stand: [
+      { head:{x:0,y:-58}, torsoTop:{x:0,y:-48}, torsoBottom:{x:0,y:-10}, shoulder:{x:0,y:-40}, hip:{x:0,y:-10},
+        elbowL:{x:-18,y:-28}, handL:{x:-32,y:-22}, elbowR:{x:14,y:-30}, handR:{x:26,y:-40},
+        kneeL:{x:-10,y:10}, footL:{x:-24,y:34}, kneeR:{x:10,y:10}, footR:{x:22,y:34},
+        shot:{held:true,x:18,y:-52}
+      },
+      { head:{x:-2,y:-58}, torsoTop:{x:-4,y:-48}, torsoBottom:{x:-2,y:-10}, shoulder:{x:-6,y:-40}, hip:{x:-2,y:-10},
+        elbowL:{x:-24,y:-38}, handL:{x:-44,y:-36}, elbowR:{x:10,y:-22}, handR:{x:20,y:-10},
+        kneeL:{x:-16,y:10}, footL:{x:-34,y:34}, kneeR:{x:6,y:10}, footR:{x:18,y:34},
+        shot:{held:true,x:10,y:-50}
+      },
+      { head:{x:6,y:-58}, torsoTop:{x:4,y:-48}, torsoBottom:{x:6,y:-10}, shoulder:{x:8,y:-40}, hip:{x:6,y:-10},
+        elbowL:{x:-8,y:-18}, handL:{x:-18,y:-6}, elbowR:{x:18,y:-44}, handR:{x:40,y:-52},
+        kneeL:{x:-2,y:10}, footL:{x:-16,y:34}, kneeR:{x:16,y:10}, footR:{x:34,y:34},
+        shot:{held:true,x:22,y:-52}
+      },
+      { head:{x:8,y:-58}, torsoTop:{x:6,y:-48}, torsoBottom:{x:8,y:-10}, shoulder:{x:10,y:-40}, hip:{x:8,y:-10},
+        elbowL:{x:-6,y:-16}, handL:{x:-10,y:-2}, elbowR:{x:26,y:-48}, handR:{x:56,y:-60},
+        kneeL:{x:0,y:10}, footL:{x:-12,y:34}, kneeR:{x:18,y:10}, footR:{x:36,y:34},
+        shot:{held:false,x:0,y:0}
       }
-
-      score++;
-    }
-
-    function drawHud() {
-      // Score and current tier
-      ctx.fillStyle = "white";
-      ctx.textAlign = "left";
-      ctx.textBaseline = "alphabetic";
-
-      ctx.font = "20px Arial";
-      ctx.fillText("Score: " + score, 10, 26);
-
-      ctx.font = "14px Arial";
-      ctx.fillText("Status: " + currentScoreTier(score), 10, 46);
-
-      // Always-visible restart hint
-      ctx.font = "14px Arial";
-      ctx.fillText("Press R to restart game", 10, 66);
-
-      // Scoreboard key (right side)
-      const panelX = 520;
-      const panelY = 10;
-      const lineH = 16;
-
-      ctx.font = "12px Arial";
-      ctx.fillText("Scoreboard Key:", panelX, panelY + 14);
-      for (let i = 0; i < SCORE_KEY.length; i++) {
-        ctx.fillText(SCORE_KEY[i], panelX, panelY + 14 + (i + 1) * lineH);
+    ],
+    glide: [
+      { head:{x:-2,y:-58}, torsoTop:{x:-4,y:-48}, torsoBottom:{x:-4,y:-10}, shoulder:{x:-6,y:-40}, hip:{x:-4,y:-10},
+        elbowL:{x:-18,y:-28}, handL:{x:-30,y:-18}, elbowR:{x:10,y:-30}, handR:{x:24,y:-42},
+        kneeL:{x:-16,y:10}, footL:{x:-36,y:34}, kneeR:{x:6,y:10}, footR:{x:18,y:34},
+        shot:{held:true,x:16,y:-52}
+      },
+      { head:{x:-4,y:-58}, torsoTop:{x:-10,y:-48}, torsoBottom:{x:-8,y:-10}, shoulder:{x:-12,y:-40}, hip:{x:-8,y:-10},
+        elbowL:{x:-30,y:-34}, handL:{x:-54,y:-30}, elbowR:{x:4,y:-18}, handR:{x:16,y:-6},
+        kneeL:{x:-22,y:8}, footL:{x:-52,y:30}, kneeR:{x:10,y:14}, footR:{x:34,y:34},
+        shot:{held:true,x:10,y:-50}
+      },
+      { head:{x:8,y:-58}, torsoTop:{x:4,y:-48}, torsoBottom:{x:6,y:-10}, shoulder:{x:8,y:-40}, hip:{x:6,y:-10},
+        elbowL:{x:-8,y:-18}, handL:{x:-18,y:-6}, elbowR:{x:18,y:-44}, handR:{x:40,y:-52},
+        kneeL:{x:-2,y:10}, footL:{x:-18,y:34}, kneeR:{x:16,y:10}, footR:{x:34,y:34},
+        shot:{held:true,x:22,y:-52}
+      },
+      { head:{x:10,y:-58}, torsoTop:{x:8,y:-48}, torsoBottom:{x:10,y:-10}, shoulder:{x:12,y:-40}, hip:{x:10,y:-10},
+        elbowL:{x:-6,y:-16}, handL:{x:-10,y:-2}, elbowR:{x:24,y:-46}, handR:{x:50,y:-58},
+        kneeL:{x:0,y:10}, footL:{x:-14,y:34}, kneeR:{x:18,y:10}, footR:{x:36,y:34},
+        shot:{held:true,x:26,y:-54}
+      },
+      { head:{x:10,y:-58}, torsoTop:{x:8,y:-48}, torsoBottom:{x:10,y:-10}, shoulder:{x:12,y:-40}, hip:{x:10,y:-10},
+        elbowL:{x:-6,y:-16}, handL:{x:-10,y:-2}, elbowR:{x:30,y:-50}, handR:{x:62,y:-62},
+        kneeL:{x:0,y:10}, footL:{x:-14,y:34}, kneeR:{x:20,y:10}, footR:{x:40,y:34},
+        shot:{held:false,x:0,y:0}
       }
+    ],
+    spin: [
+      { head:{x:-2,y:-58}, torsoTop:{x:-4,y:-48}, torsoBottom:{x:-4,y:-10}, shoulder:{x:-6,y:-40}, hip:{x:-4,y:-10},
+        elbowL:{x:-22,y:-36}, handL:{x:-44,y:-38}, elbowR:{x:8,y:-18}, handR:{x:20,y:-6},
+        kneeL:{x:-18,y:10}, footL:{x:-38,y:34}, kneeR:{x:8,y:10}, footR:{x:20,y:34},
+        shot:{held:true,x:14,y:-52}
+      },
+      { head:{x:-6,y:-58}, torsoTop:{x:-14,y:-48}, torsoBottom:{x:-10,y:-10}, shoulder:{x:-16,y:-40}, hip:{x:-10,y:-10},
+        elbowL:{x:-36,y:-30}, handL:{x:-60,y:-20}, elbowR:{x:0,y:-26}, handR:{x:8,y:-44},
+        kneeL:{x:-30,y:8}, footL:{x:-62,y:28}, kneeR:{x:14,y:14}, footR:{x:42,y:34},
+        shot:{held:true,x:10,y:-50}
+      },
+      { head:{x:0,y:-58}, torsoTop:{x:-2,y:-48}, torsoBottom:{x:0,y:-10}, shoulder:{x:2,y:-40}, hip:{x:0,y:-10},
+        elbowL:{x:-26,y:-18}, handL:{x:-40,y:-4}, elbowR:{x:14,y:-36}, handR:{x:30,y:-52},
+        kneeL:{x:-10,y:12}, footL:{x:-24,y:34}, kneeR:{x:20,y:6}, footR:{x:44,y:26},
+        shot:{held:true,x:18,y:-52}
+      },
+      { head:{x:8,y:-58}, torsoTop:{x:4,y:-48}, torsoBottom:{x:6,y:-10}, shoulder:{x:8,y:-40}, hip:{x:6,y:-10},
+        elbowL:{x:-8,y:-18}, handL:{x:-18,y:-6}, elbowR:{x:18,y:-44}, handR:{x:40,y:-52},
+        kneeL:{x:-2,y:10}, footL:{x:-18,y:34}, kneeR:{x:16,y:10}, footR:{x:34,y:34},
+        shot:{held:true,x:22,y:-52}
+      },
+      { head:{x:10,y:-58}, torsoTop:{x:8,y:-48}, torsoBottom:{x:10,y:-10}, shoulder:{x:12,y:-40}, hip:{x:10,y:-10},
+        elbowL:{x:-6,y:-16}, handL:{x:-10,y:-2}, elbowR:{x:26,y:-48}, handR:{x:56,y:-60},
+        kneeL:{x:0,y:10}, footL:{x:-14,y:34}, kneeR:{x:18,y:10}, footR:{x:38,y:34},
+        shot:{held:true,x:26,y:-54}
+      },
+      { head:{x:10,y:-58}, torsoTop:{x:8,y:-48}, torsoBottom:{x:10,y:-10}, shoulder:{x:12,y:-40}, hip:{x:10,y:-10},
+        elbowL:{x:-6,y:-16}, handL:{x:-10,y:-2}, elbowR:{x:32,y:-50}, handR:{x:66,y:-64},
+        kneeL:{x:0,y:10}, footL:{x:-14,y:34}, kneeR:{x:22,y:10}, footR:{x:44,y:34},
+        shot:{held:false,x:0,y:0}
+      }
+    ]
+  };
+
+  function drawStick(pose, px, py) {
+    ctx.save();
+    ctx.translate(px, py);
+    ctx.lineWidth = 3;
+    ctx.strokeStyle = "#eaeaea";
+
+    ctx.beginPath(); ctx.arc(pose.head.x, pose.head.y, 10, 0, Math.PI * 2); ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(pose.torsoTop.x, pose.torsoTop.y);
+    ctx.lineTo(pose.torsoBottom.x, pose.torsoBottom.y);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(pose.shoulder.x, pose.shoulder.y);
+    ctx.lineTo(pose.elbowL.x, pose.elbowL.y);
+    ctx.lineTo(pose.handL.x, pose.handL.y);
+    ctx.moveTo(pose.shoulder.x, pose.shoulder.y);
+    ctx.lineTo(pose.elbowR.x, pose.elbowR.y);
+    ctx.lineTo(pose.handR.x, pose.handR.y);
+    ctx.stroke();
+
+    ctx.beginPath();
+    ctx.moveTo(pose.hip.x, pose.hip.y);
+    ctx.lineTo(pose.kneeL.x, pose.kneeL.y);
+    ctx.lineTo(pose.footL.x, pose.footL.y);
+    ctx.moveTo(pose.hip.x, pose.hip.y);
+    ctx.lineTo(pose.kneeR.x, pose.kneeR.y);
+    ctx.lineTo(pose.footR.x, pose.footR.y);
+    ctx.stroke();
+
+    if (pose.shot && pose.shot.held) {
+      ctx.fillStyle = "#cfcfcf";
+      ctx.beginPath();
+      ctx.arc(pose.shot.x, pose.shot.y, 7, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
+  const state = {
+    techKey: null,
+    mode: "menu", // menu | active | flight | done
+    stepIndex: 0,
+    startedAt: null,
+    distanceFt: null,
+    earlyRelease: false,
+
+    thrower: { x: scene.circle.x, y: scene.circle.y, poseIndex: 0 },
+    shot: null,
+    landing: null
+  };
+
+  function setButtonsEnabled(enabled) {
+    btnStand.disabled = !enabled;
+    btnGlide.disabled = !enabled;
+    btnSpin.disabled  = !enabled;
+  }
+
+  function setTech(key) {
+    state.techKey = key;
+    state.mode = "active";
+    state.stepIndex = 0;
+    state.startedAt = null;
+    state.distanceFt = null;
+    state.earlyRelease = false;
+    state.shot = null;
+    state.landing = null;
+
+    if (key === "stand") state.thrower.x = scene.circle.x;
+    if (key === "glide") state.thrower.x = scene.circle.x - 20;
+    if (key === "spin")  state.thrower.x = scene.circle.x - 15;
+    state.thrower.y = scene.circle.y;
+    state.thrower.poseIndex = 0;
+
+    instructionsEl.innerHTML = TECH[key].instructions;
+    statusEl.textContent = `${TECH[key].name}: ready.`;
+    resultEl.textContent = "—";
+    debugEl.textContent = "";
+
+    setButtonsEnabled(true);
+  }
+
+  function restart() {
+    if (!state.techKey) return;
+    // Restart unlocks everything
+    setButtonsEnabled(true);
+    setTech(state.techKey);
+  }
+
+  function guardedSelect(key, btnEl) {
+    // Mandatory lock: cannot switch throws while in flight/done
+    if (state.mode === "flight" || state.mode === "done") return;
+    setTech(key);
+    // Important: remove focus so Space never triggers the button
+    btnEl.blur();
+    // Also blur anything else that might be focused
+    if (document.activeElement && document.activeElement.blur) document.activeElement.blur();
+  }
+
+  btnStand.addEventListener("click", () => guardedSelect("stand", btnStand));
+  btnGlide.addEventListener("click", () => guardedSelect("glide", btnGlide));
+  btnSpin.addEventListener("click",  () => guardedSelect("spin",  btnSpin));
+
+  document.addEventListener("keydown", (e) => {
+    const key = normalizeKey(e);
+
+    // Stop the browser from treating Space as a "button click" or scrolling arrows
+    if (key === "Space" || key === "ArrowLeft" || key === "ArrowRight") {
+      e.preventDefault();
     }
 
-    function draw(showGameOver = false) {
-      ctx.clearRect(0, 0, canvas.width, canvas.height);
+    // Mandatory lock: after result, only R works
+    if (state.mode === "done") {
+      if (key === "KeyR") restart();
+      return;
+    }
 
-      // Player
-      ctx.fillStyle = "lime";
-      ctx.fillRect(player.x, player.y, player.size, player.size);
+    // During flight, ignore all keys (including R) until landing completes
+    if (state.mode === "flight") return;
 
-      // Player label
-      ctx.fillStyle = "white";
-      ctx.font = "12px Arial";
+    // R always restarts if not in flight (and a tech is selected)
+    if (key === "KeyR") {
+      restart();
+      return;
+    }
+
+    if (state.mode !== "active") return;
+    if (!state.techKey) return;
+
+    const tech = TECH[state.techKey];
+    const expected = tech.steps[state.stepIndex];
+
+    if (state.startedAt == null) state.startedAt = performance.now();
+
+    // Early release penalty
+    if (key === "Space" && expected !== "Space") {
+      state.earlyRelease = true;
+      finalizeThrow(true);
+      return;
+    }
+
+    if (key !== expected) return;
+
+    state.stepIndex++;
+    advancePoseAndPosition();
+
+    if (key === "Space") {
+      finalizeThrow(false);
+      return;
+    }
+
+    const next = tech.steps[state.stepIndex];
+    if (next) statusEl.textContent = `${tech.name}: next key is ${prettyKey(next)}.`;
+  }, { passive: false });
+
+  function normalizeKey(e) {
+    if (e.code === "Space") return "Space";
+    if (e.code === "KeyR") return "KeyR";
+    if (["ArrowLeft","ArrowRight"].includes(e.key)) return e.key;
+    return e.key;
+  }
+
+  function prettyKey(k) {
+    if (k === "ArrowLeft") return "←";
+    if (k === "ArrowRight") return "→";
+    if (k === "Space") return "Space";
+    return k;
+  }
+
+  function advancePoseAndPosition() {
+    const poses = POSES[state.techKey];
+    state.thrower.poseIndex = clamp(state.stepIndex, 0, poses.length - 1);
+
+    if (state.techKey === "glide") {
+      const t = clamp(state.stepIndex / 4, 0, 1);
+      state.thrower.x = (scene.circle.x - 35) + t * 60;
+    } else if (state.techKey === "spin") {
+      const t = clamp(state.stepIndex / 5, 0, 1);
+      state.thrower.x = (scene.circle.x - 25) + Math.sin(t * Math.PI) * 35;
+    } else {
+      state.thrower.x = scene.circle.x + clamp(state.stepIndex, 0, 2) * 6;
+    }
+  }
+
+  function finalizeThrow(releasedEarly) {
+    const tech = TECH[state.techKey];
+    const now = performance.now();
+    const elapsed = (state.startedAt == null) ? tech.slowMs : (now - state.startedAt);
+
+    const speedScore = clamp((tech.slowMs - elapsed) / (tech.slowMs - tech.fastMs), 0, 1);
+
+    const totalSteps = tech.steps.length;
+    const completedSteps = releasedEarly ? state.stepIndex : totalSteps;
+    const completionRatio = clamp(completedSteps / totalSteps, 0, 1);
+
+    const completionPenalty = Math.pow(completionRatio, 1.7);
+
+    let ft = tech.minFt + (tech.maxFt - tech.minFt) * speedScore;
+    ft = tech.minFt + (ft - tech.minFt) * completionPenalty;
+    if (releasedEarly) ft = tech.minFt + (ft - tech.minFt) * 0.55;
+
+    state.distanceFt = Math.round(ft * 10) / 10;
+
+    const rangePx = state.distanceFt * distanceScale.pxPerFt;
+    const landX = clamp(distanceScale.startX + rangePx, distanceScale.startX, distanceScale.endX);
+    const landY = scene.groundY - 8;
+
+    const poses = POSES[state.techKey];
+    const pose = poses[clamp(state.thrower.poseIndex, 0, poses.length - 1)];
+    const startX = state.thrower.x + pose.handR.x;
+    const startY = state.thrower.y + pose.handR.y;
+
+    const arc = 120 + (state.distanceFt / tech.maxFt) * 140;
+
+    state.shot = { t: 0, dur: 1.15, x0: startX, y0: startY, x1: landX, y1: landY, arc };
+    state.landing = { x: landX, y: landY };
+    state.mode = "flight";
+
+    // Lock buttons during flight and done
+    setButtonsEnabled(false);
+
+    statusEl.textContent = `${tech.name}: released.`;
+    debugEl.textContent = `Elapsed: ${Math.round(elapsed)}ms. Speed: ${Math.round(speedScore*100)}%. Completion: ${Math.round(completionRatio*100)}%.`;
+  }
+
+  function drawScene() {
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+
+    ctx.fillStyle = "#0e0e0e";
+    ctx.fillRect(0,0,canvas.width,canvas.height);
+
+    ctx.fillStyle = "#1a1410";
+    ctx.strokeStyle = "#6b523c";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(scene.sector.x0, scene.sector.y0);
+    ctx.lineTo(scene.sector.x1, scene.sector.y1);
+    ctx.lineTo(scene.sector.x2, scene.sector.y2);
+    ctx.lineTo(scene.sector.x3, scene.sector.y3);
+    ctx.closePath();
+    ctx.fill();
+    ctx.stroke();
+
+    ctx.strokeStyle = "#2c2c2c";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(0, scene.groundY);
+    ctx.lineTo(canvas.width, scene.groundY);
+    ctx.stroke();
+
+    ctx.strokeStyle = "#4a4a4a";
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.arc(scene.circle.x, scene.circle.y, scene.circle.r, 0, Math.PI*2);
+    ctx.stroke();
+
+    ctx.strokeStyle = "#888";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(scene.foulLineX, scene.groundY - 110);
+    ctx.lineTo(scene.foulLineX, scene.groundY + 40);
+    ctx.stroke();
+
+    ctx.strokeStyle = "#3b3b3b";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(distanceScale.startX, scene.groundY + 20);
+    ctx.lineTo(distanceScale.endX, scene.groundY + 20);
+    ctx.stroke();
+
+    ctx.fillStyle = "#bdbdbd";
+    ctx.font = "12px Arial";
+    ctx.textAlign = "center";
+    for (let ft = 0; ft <= distanceScale.maxFt; ft += 5) {
+      const x = distanceScale.startX + ft * distanceScale.pxPerFt;
+      ctx.beginPath();
+      ctx.moveTo(x, scene.groundY + 12);
+      ctx.lineTo(x, scene.groundY + 28);
+      ctx.stroke();
+      ctx.fillText(String(ft), x, scene.groundY + 44);
+    }
+    ctx.textAlign = "left";
+  }
+
+  function drawThrower() {
+    if (!state.techKey) return;
+    const poses = POSES[state.techKey];
+    const pose = poses[clamp(state.thrower.poseIndex, 0, poses.length - 1)];
+    drawStick(pose, state.thrower.x, state.thrower.y);
+  }
+
+  function drawShotAndLanding() {
+    // Always show landing marker + distance once a throw has been computed.
+    if (state.landing && state.distanceFt != null) {
+      ctx.strokeStyle = "#ffd28a";
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      ctx.moveTo(state.landing.x, scene.groundY - 60);
+      ctx.lineTo(state.landing.x, scene.groundY + 8);
+      ctx.stroke();
+
+      ctx.fillStyle = "#ffd28a";
+      ctx.font = "16px Arial";
       ctx.textAlign = "center";
-      ctx.textBaseline = "bottom";
-      ctx.fillText(player.label, player.x + player.size / 2, player.y - 3);
+      ctx.fillText(`${state.distanceFt}'`, state.landing.x, scene.groundY - 70);
+      ctx.textAlign = "left";
+    }
 
-      // Enemies + labels
-      for (const enemy of enemies) {
-        ctx.fillStyle = "red";
-        ctx.fillRect(enemy.x, enemy.y, enemy.size, enemy.size);
+    if (!state.shot) return;
 
-        ctx.fillStyle = "white";
-        ctx.font = "10px Arial";
-        ctx.textAlign = "center";
-        ctx.textBaseline = "top";
-        ctx.fillText(enemy.label, enemy.x + enemy.size / 2, enemy.y + enemy.size + 2);
-      }
+    const s = state.shot;
+    const t = clamp(s.t / s.dur, 0, 1);
 
-      // HUD (score, tier, key, restart hint)
-      drawHud();
+    const x = s.x0 + (s.x1 - s.x0) * t;
+    const yLin = s.y0 + (s.y1 - s.y0) * t;
+    const y = yLin - (4 * s.arc * t * (1 - t));
 
-      if (showGameOver) {
-        ctx.fillStyle = "rgba(0,0,0,0.65)";
-        ctx.fillRect(0, 0, canvas.width, canvas.height);
+    ctx.fillStyle = "#cfcfcf";
+    ctx.beginPath();
+    ctx.arc(x, y, 7, 0, Math.PI * 2);
+    ctx.fill();
 
-        ctx.fillStyle = "white";
-        ctx.textAlign = "center";
+    ctx.strokeStyle = "rgba(207,207,207,0.20)";
+    ctx.lineWidth = 2;
+    ctx.beginPath();
+    ctx.moveTo(s.x0, s.y0);
+    ctx.lineTo(x, y);
+    ctx.stroke();
+  }
 
-        ctx.font = "44px Arial";
-        ctx.fillText("Game Over", canvas.width / 2, canvas.height / 2 - 60);
+  // Persistent result panel in DONE state
+  function drawOverlay() {
+    ctx.fillStyle = "rgba(0,0,0,0.40)";
+    ctx.fillRect(0, 0, canvas.width, 58);
 
-        ctx.font = "24px Arial";
-        ctx.fillText("Final Score: " + score, canvas.width / 2, canvas.height / 2 - 10);
+    ctx.fillStyle = "#eaeaea";
+    ctx.font = "16px Arial";
+    const name = state.techKey ? TECH[state.techKey].name : "None";
+    ctx.fillText(`Throw: ${name}`, 12, 22);
 
-        ctx.font = "18px Arial";
-        ctx.fillText("Status: " + currentScoreTier(score), canvas.width / 2, canvas.height / 2 + 22);
+    if (state.mode === "active" && state.techKey) {
+      const tech = TECH[state.techKey];
+      const next = tech.steps[state.stepIndex];
+      if (next) ctx.fillText(`Next key: ${prettyKey(next)}`, 12, 44);
+    }
 
-        ctx.font = "20px Arial";
-        ctx.fillText("Press R to Restart", canvas.width / 2, canvas.height / 2 + 58);
+    if (state.mode === "done" && state.distanceFt != null) {
+      const boxW = 520;
+      const boxH = 170;
+      const boxX = (canvas.width - boxW) / 2;
+      const boxY = (canvas.height - boxH) / 2;
+
+      ctx.fillStyle = "rgba(0,0,0,0.70)";
+      ctx.fillRect(boxX, boxY, boxW, boxH);
+
+      ctx.strokeStyle = "rgba(255,255,255,0.25)";
+      ctx.lineWidth = 2;
+      ctx.strokeRect(boxX, boxY, boxW, boxH);
+
+      ctx.fillStyle = "#ffffff";
+      ctx.textAlign = "center";
+
+      ctx.font = "22px Arial";
+      ctx.fillText("Result", canvas.width / 2, boxY + 45);
+
+      ctx.font = "54px Arial";
+      ctx.fillText(`${state.distanceFt}'`, canvas.width / 2, boxY + 105);
+
+      ctx.font = "18px Arial";
+      const early = state.earlyRelease ? "Early release penalty applied. " : "";
+      ctx.fillText(`${early}Press R to restart`, canvas.width / 2, boxY + 140);
+
+      ctx.textAlign = "left";
+    }
+  }
+
+  let last = performance.now();
+  function loop(now) {
+    const dt = (now - last) / 1000;
+    last = now;
+
+    if (state.mode === "flight" && state.shot) {
+      state.shot.t += dt;
+      if (state.shot.t >= state.shot.dur) {
+        state.shot.t = state.shot.dur;
+        state.mode = "done";
+
+        const tech = TECH[state.techKey];
+        const early = state.earlyRelease ? " (early release penalty applied)" : "";
+        resultEl.textContent = `${tech.name}: ${state.distanceFt}'${early}`;
+        statusEl.textContent = `Throw complete. Game locked. Press R to restart.`;
       }
     }
 
-    function gameLoop() {
-      update();
-      draw(false);
-      if (!gameOver) animationId = requestAnimationFrame(gameLoop);
-    }
+    drawScene();
+    drawThrower();
+    drawShotAndLanding();
+    drawOverlay();
 
-    resetGame();
-  </script>
+    requestAnimationFrame(loop);
+  }
+
+  instructionsEl.textContent = "Choose Stand, Glide, or Spin.";
+  statusEl.textContent = "No throw yet.";
+  resultEl.textContent = "—";
+  setButtonsEnabled(true);
+  requestAnimationFrame(loop);
+})();
+</script>
 </body>
 </html>
